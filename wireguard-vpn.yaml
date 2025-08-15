@@ -1,0 +1,307 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: "Deploy a fully configured WireGuard VPN server on AWS, ready for client connections."
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: "The VPC where the WireGuard VPN will operate and have connectivity."
+    Default: ''
+
+  PublicSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: "Public subnet within the selected VPC where the WireGuard EC2 instance will be deployed."
+    Default: ''
+
+  Prefix:
+    Type: String
+    Default: ''
+    Description: "(Optional) Prefix for all AWS resource names created by this stack; if not empty, it must end with '-'."
+    AllowedPattern: '^$|.*-$'
+    ConstraintDescription: "Prefix must be empty or end with a '-'"
+
+  AttachElasticIp:
+    Type: String
+    Default: 'False'
+    AllowedValues: ['True', 'False']
+    Description: "Whether to attach an Elastic IP to the WireGuard EC2 instance."
+
+  VpnCidr:
+    Type: String
+    Default: 100.64.0.0/16
+    AllowedPattern: '^.+/(1[6-9]|2[0-4])$'
+    Description: "CIDR block for the VPN network; must be between /16 and /24."
+
+  ClientConfig:
+    Type: String
+    Description: "Comma-separated list of client alias and public key pairs (alias:PublicKey,alias:PublicKey)."
+    Default: ''
+
+  Port:
+    Type: Number
+    Default: 51820
+    Description: "UDP port on which WireGuard server will listen."
+
+Conditions:
+  UseElasticIp: !Equals [!Ref AttachElasticIp, 'True']
+
+Resources:
+  # IAM role assumed by the WireGuard EC2 instance
+  WireGuardIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}wireguard-iam-role"
+      Description: "IAM role for WireGuard EC2 instance"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Path: /
+
+  # Instance profile for associating the WireGuard IAM role with the EC2 instance
+  WireGuardInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${Prefix}wireguard-instance-profile"
+      Roles:
+        - !Ref WireGuardIamRole
+      Path: /
+
+  # Security Group for the WireGuard EC2 instance, allowing WireGuard UDP traffic
+  WireGuardInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${Prefix}-wireguard-security-group"
+      GroupDescription: "Security Group for WireGuard EC2 instance"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: udp
+          FromPort: !Ref Port
+          ToPort: !Ref Port
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}-wireguard-security-group"
+
+  # Elastic IP for the WireGuard EC2 instance (conditionally attached)
+  WireGuardElasticIp:
+    Type: AWS::EC2::EIP
+    Condition: UseElasticIp
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}wireguard-elastic-ip"
+  
+  # Association of the Elastic IP to the WireGuard EC2 instance (conditional)
+  ElasticIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Condition: UseElasticIp
+    Properties:
+      AllocationId: !GetAtt WireGuardElasticIp.AllocationId
+      InstanceId: !Ref WireGuardEc2Instance
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}wireguard-eip-association"
+  
+  # WaitConditionHandle used by CloudFormation to wait for EC2 setup completion
+  WaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+  # WaitCondition to pause stack creation until the WireGuard EC2 instance signals success
+  WaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    Properties:
+      Handle: !Ref WaitHandle
+      Timeout: 600 
+      Count: 1
+
+  # EC2 instance running WireGuard VPN with user data to configure the server
+  WireGuardEc2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      SubnetId: !Ref PublicSubnetId
+      ImageId: !Sub "{{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id}}"
+      IamInstanceProfile: !Ref WireGuardInstanceProfile
+      SecurityGroupIds:
+        - !Ref WireGuardInstanceSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -xe
+          export VPN_CIDR="${VpnCidr}"
+          export PORT="${Port}"
+          export CLIENT_CONFIG="${ClientConfig}"
+          export WAIT_HANDLE="${WaitHandle}"
+          echo IyEvYmluL2Jhc2gKc2V0IC14ZQoKIyBVcGRhdGUgcGFja2FnZSBsaXN0cyBhbmQgaW5zdGFsbCByZXF1aXJlZCBwYWNrYWdlcwphcHQgdXBkYXRlCmFwdCBpbnN0YWxsIC15IHdpcmVndWFyZCBhd3NjbGkganEKCiMgR2VuZXJhdGUgc2VydmVyIGtleXMKd2cgZ2Vua2V5IHwgdGVlIC9ldGMvd2lyZWd1YXJkL3ByaXZhdGUua2V5CmNobW9kIDYwMCAvZXRjL3dpcmVndWFyZC9wcml2YXRlLmtleQpjYXQgL2V0Yy93aXJlZ3VhcmQvcHJpdmF0ZS5rZXkgfCB3ZyBwdWJrZXkgfCB0ZWUgL2V0Yy93aXJlZ3VhcmQvcHVibGljLmtleQoKIyBEZXRlcm1pbmUgcHJpbWFyeSBuZXR3b3JrIGludGVyZmFjZSBmb3IgTkFUClBSSU1BUllfSUY9JChpcCByIHwgZ3JlcCAnXmRlZmF1bHQnIHwgYXdrICd7cHJpbnQgJDV9JykKCiMgQ3JlYXRlIGJhc2Ugd2cwLmNvbmYgY29uZmlndXJhdGlvbiB3aXRoIGlubGluZSBjb21tZW50cwplY2hvICJbSW50ZXJmYWNlXSIgPiAvZXRjL3dpcmVndWFyZC93ZzAuY29uZgplY2hvICIjIFByaXZhdGUga2V5IGdlbmVyYXRlZCBvbiB0aGUgRUMyIGluc3RhbmNlIiA+PiAvZXRjL3dpcmVndWFyZC93ZzAuY29uZgplY2hvICJQcml2YXRlS2V5ID0gJChjYXQgL2V0Yy93aXJlZ3VhcmQvcHJpdmF0ZS5rZXkpIiA+PiAvZXRjL3dpcmVndWFyZC93ZzAuY29uZgplY2hvICIjIElQIGFkZHJlc3MgYXNzaWduZWQgdG8gdGhlIEVDMiBpbnN0YW5jZSB3aXRoaW4gdGhlIFZQTiIgPj4gL2V0Yy93aXJlZ3VhcmQvd2cwLmNvbmYKZWNobyAiQWRkcmVzcyA9ICR7VlBOX0NJRFIlLip9LjEvMzIiID4+IC9ldGMvd2lyZWd1YXJkL3dnMC5jb25mCmVjaG8gIiMgUG9ydCBXaXJlR3VhcmQgd2lsbCBsaXN0ZW4gb24iID4+IC9ldGMvd2lyZWd1YXJkL3dnMC5jb25mCmVjaG8gIkxpc3RlblBvcnQgPSAke1BPUlR9IiA+PiAvZXRjL3dpcmVndWFyZC93ZzAuY29uZgplY2hvICIjIFRyYWZmaWMgbWFzcXVlcmFkaW5nIHJ1bGVzIGZvciBQb3N0VXAgYW5kIFBvc3REb3duIiA+PiAvZXRjL3dpcmVndWFyZC93ZzAuY29uZgplY2hvICJQb3N0VXAgPSBpcHRhYmxlcyAtQSBGT1JXQVJEIC1pICVpIC1qIEFDQ0VQVDsgaXB0YWJsZXMgLXQgbmF0IC1BIFBPU1RST1VUSU5HIC1vICRQUklNQVJZX0lGIC1qIE1BU1FVRVJBREUiID4+IC9ldGMvd2lyZWd1YXJkL3dnMC5jb25mCmVjaG8gIlBvc3REb3duID0gaXB0YWJsZXMgLUQgRk9SV0FSRCAtaSAlaSAtaiBBQ0NFUFQ7IGlwdGFibGVzIC10IG5hdCAtRCBQT1NUUk9VVElORyAtbyAkUFJJTUFSWV9JRiAtaiBNQVNRVUVSQURFIiA+PiAvZXRjL3dpcmVndWFyZC93ZzAuY29uZgoKIyBQcm9jZXNzIGNsaWVudCBjb25maWd1cmF0aW9ucwpJRlM9JywnIHJlYWQgLXJhIENMSUVOVFMgPDw8ICIkQ0xJRU5UX0NPTkZJRyIKZGVjbGFyZSAtQSBDTElFTlRTX01BUApDTElFTlRTX0pTT049Int9IiAgICMgSW5pdGlhbGl6ZSBhcyBlbXB0eSBKU09OIG9iamVjdAppcF9pbmRleD0yCgpmb3IgZW50cnkgaW4gIiR7Q0xJRU5UU1tAXX0iOyBkbwogIGFsaWFzPSQoZWNobyAiJGVudHJ5IiB8IGN1dCAtZCc6JyAtZjEpCiAgcHVia2V5PSQoZWNobyAiJGVudHJ5IiB8IGN1dCAtZCc6JyAtZjIpCgogICMgQXNzaWduIElQIGFkZHJlc3MgdG8gY2xpZW50CiAgY2xpZW50X2lwPSIke1ZQTl9DSURSJS4qfS4ke2lwX2luZGV4fS8zMiIKICBDTElFTlRTX01BUFsiJGFsaWFzIl09IiRjbGllbnRfaXAiCgogICMgQXBwZW5kIGNsaWVudCBwZWVyIGNvbmZpZ3VyYXRpb24gdG8gd2cwLmNvbmYKICBlY2hvICIiID4+IC9ldGMvd2lyZWd1YXJkL3dnMC5jb25mCiAgZWNobyAiW1BlZXJdIiA+PiAvZXRjL3dpcmVndWFyZC93ZzAuY29uZgogIGVjaG8gIiMgUHVibGljIGtleSBnZW5lcmF0ZWQgZm9yIENsaWVudCAke2FsaWFzfSIgPj4gL2V0Yy93aXJlZ3VhcmQvd2cwLmNvbmYKICBlY2hvICJQdWJsaWNLZXkgPSAke3B1YmtleX0iID4+IC9ldGMvd2lyZWd1YXJkL3dnMC5jb25mCiAgZWNobyAiIyBJUCBhZGRyZXNzIGFzc2lnbmVkIHRvIENsaWVudCAke2FsaWFzfSB3aXRoaW4gVlBOIiA+PiAvZXRjL3dpcmVndWFyZC93ZzAuY29uZgogIGVjaG8gIkFsbG93ZWRJUHMgPSAke2NsaWVudF9pcH0iID4+IC9ldGMvd2lyZWd1YXJkL3dnMC5jb25mCgogICMgQWRkIGNsaWVudCB0byBKU09OIG9iamVjdAogIENMSUVOVFNfSlNPTj0kKGVjaG8gIiRDTElFTlRTX0pTT04iIHwganEgLS1hcmcgYSAiJGFsaWFzIiAtLWFyZyBpcCAiJGNsaWVudF9pcCIgJy4gKyB7KCRhKTogJGlwfScpCgogICgoaXBfaW5kZXgrKykpCmRvbmUKCiMgU2VjdXJlIHdnMC5jb25mIGZpbGUKc3VkbyBjaG1vZCA2MDAgL2V0Yy93aXJlZ3VhcmQvd2cwLmNvbmYKIyBFbmFibGUgSVB2NCBmb3J3YXJkaW5nCnN1ZG8gc2VkIC1pICdzL14jXChuZXQuaXB2NC5pcF9mb3J3YXJkPTFcKS9cMS8nIC9ldGMvc3lzY3RsLmNvbmYKc3VkbyBzeXNjdGwgLXAKIyBFbmFibGUgYW5kIHN0YXJ0IFdpcmVHdWFyZCBzZXJ2aWNlCnN1ZG8gc3lzdGVtY3RsIGVuYWJsZSB3Zy1xdWlja0B3ZzAKc3VkbyBzeXN0ZW1jdGwgc3RhcnQgd2ctcXVpY2tAd2cwCnN1ZG8gc3lzdGVtY3RsIHN0YXR1cyB3Zy1xdWlja0B3ZzAKCiMgRXh0cmFjdCBwdWJsaWMga2V5IGZvciBzaWduYWxpbmcKUFVCS0VZPSQoY2F0IC9ldGMvd2lyZWd1YXJkL3B1YmxpYy5rZXkpCgojIFByZXBhcmUgZmluYWwgSlNPTiB3aXRoIHNlcnZlciBwdWJsaWMga2V5IGFuZCBjbGllbnQgYWRkcmVzc2VzCkpTT049JChqcSAtbiAtLWFyZyBwayAiJFBVQktFWSIgLS1hcmdqc29uIGNhICIkQ0xJRU5UU19KU09OIiBcCiAgICAgICAgICAne3B1YmxpY0tleTokcGssIGNsaWVudHNBZGRyZXNzZXM6JGNhfScpCgojIEVuY29kZSBKU09OIHRvIGJhc2U2NApFTkNPREVEX0pTT049JChlY2hvICIkSlNPTiIgfCBiYXNlNjQgLXcwKQoKIyBTZW5kIHN1Y2Nlc3Mgc2lnbmFsIHRvIFdhaXRDb25kaXRpb25IYW5kbGUKY3VybCAtWCBQVVQgLUggJ0NvbnRlbnQtVHlwZTonIFwKICAtLWRhdGEtYmluYXJ5ICJ7XCJTdGF0dXNcIjpcIlNVQ0NFU1NcIixcIlJlYXNvblwiOlwiV2lyZUd1YXJkIHJlYWR5XCIsXCJVbmlxdWVJZFwiOlwiV2lyZUd1YXJkQ29uZmlnXCIsXCJEYXRhXCI6XCIkRU5DT0RFRF9KU09OXCJ9IiBcCiAgIiR7V0FJVF9IQU5ETEV9Igo= | base64 -d | bash
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}wireguard-vpn-instance"
+
+  # IAM role for executing the WireGuard CloudFormation custom resource Lambda
+  CustomResourceLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}wireguard-custom-resource-lambda-role"
+      Description: "IAM role for executing the WireGuard CloudFormation custom resource Lambda"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess
+
+  # Lambda function that generates WireGuard tunnel configuration for clients
+  CustomResourceLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${Prefix}wireguard-custom-resource-lambda"
+      Description: "CloudFormation custom resource Lambda function to generate WireGuard tunnel configuration"
+      Handler: index.handler
+      Runtime: python3.12
+      Timeout: 60
+      Role: !GetAtt CustomResourceLambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import base64
+          import boto3
+          import cfnresponse
+          
+          # Initialize EC2 client
+          ec2 = boto3.client("ec2")
+          
+          def handler(event, context):
+              try:
+                  # Log the received CloudFormation event for debugging
+                  print("Received event:", json.dumps(event))
+
+                  # Extract resource properties from the CloudFormation custom resource
+                  props = event["ResourceProperties"]
+                  encoded_json_wrapper = props["EncodedJson"]
+
+                  # Decode the wrapper JSON containing WireGuard configuration
+                  wrapper = json.loads(encoded_json_wrapper)
+                  encoded_config = wrapper["WireGuardConfig"]
+
+                  # Extract additional properties
+                  public_ip = props["PublicIp"]
+                  vpn_cidr = props["VpnCidr"]
+                  port = int(props.get("Port", 51820))
+                  vpc_id = props["VpcId"]
+                  
+                  # Retrieve VPC CIDR block from AWS
+                  vpc_resp = ec2.describe_vpcs(VpcIds=[vpc_id])
+                  vpc_cidr = vpc_resp["Vpcs"][0]["CidrBlock"]
+                  
+                  # Decode the base64-encoded WireGuard JSON from the EC2 instance
+                  decoded_bytes = base64.b64decode(encoded_config)
+                  decoded_str = decoded_bytes.decode("utf-8")
+                  ec2_data = json.loads(decoded_str)
+                  
+                  # Extract server public key and client IPs
+                  server_pubkey = ec2_data.get("publicKey")
+                  clients = ec2_data.get("clientsAddresses", {})
+                  
+                  # Build multi-line tunnel configuration for each client
+                  lines = []
+                  for alias, client_ip in clients.items():
+                      # Create individual configuration block for the client
+                      block_lines = [
+                          f"Address = {client_ip}",  # Client's VPN address
+                          "[Peer]",  # Begin peer section
+                          f"PublicKey = {server_pubkey}",  # WireGuard server public key
+                          f"AllowedIPs = {vpn_cidr}, {vpc_cidr}",  # Routes allowed for the client
+                          f"Endpoint = {public_ip}:{port}"  # Server endpoint for this peer
+                      ]
+                      block_text = "\n".join(block_lines)
+
+                      # Encode each block in base64 to safely transport via JSON
+                      encoded_block = base64.b64encode(block_text.encode()).decode()
+                      lines.append(f"{alias}: {encoded_block}")
+
+                  # Join all client blocks into a single string separated by spaces
+                  tunnel_config = " ".join(lines)
+
+                  # Prepare response data for CloudFormation
+                  response_data = {"TunnelConfig": tunnel_config}
+
+                  # Send SUCCESS response to CloudFormation
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+
+              except Exception as e:
+                  # On any error, send FAILED response with error message
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {"Error": str(e)})
+
+  # Custom resource that triggers the Lambda to generate tunnel configuration
+  CustomResource:
+    Type: Custom::WireGuardTunnelConfig
+    Properties:
+      ServiceToken: !GetAtt CustomResourceLambdaFunction.Arn
+      EncodedJson: !GetAtt WaitCondition.Data
+      PublicIp: !If [UseElasticIp, !Ref WireGuardElasticIp, !GetAtt WireGuardEc2Instance.PublicIp]
+      VpnCidr: !Ref VpnCidr
+      Port: !Ref Port
+      VpcId: !Ref VpcId
+
+Outputs:
+  WireGuardSecurityGroupId:
+    Description: "Security Group ID attached to the WireGuard EC2 instance."
+    Value: !Ref WireGuardInstanceSecurityGroup
+  
+  WireGuardInstanceId:
+    Description: "EC2 instance ID running the WireGuard server."
+    Value: !Ref WireGuardEc2Instance
+  
+  WireGuardPublicIp:
+    Description: "Public IP address of the WireGuard EC2 instance (Elastic IP if configured)."
+    Value: !If [UseElasticIp, !Ref WireGuardElasticIp, !GetAtt WireGuardEc2Instance.PublicIp]
+  
+  WireGuardPrivateIp:
+    Description: "Private IP address of the WireGuard EC2 instance."
+    Value: !GetAtt WireGuardEc2Instance.PrivateIp
+  
+  TestPing:
+    Description: "Command to ping the WireGuard instance's private IP for connectivity testing."
+    Value: !Sub "ping ${WireGuardEc2Instance.PrivateIp}"
+  
+  WireGuardTunnelConfig:
+    Description: "Complete WireGuard tunnel configuration for clients."
+    Value: !GetAtt CustomResource.TunnelConfig
+
+  WireGuardPort:
+    Description: "UDP port on which the WireGuard server listens."
+    Value: !Ref Port
+
+  WireGuardVpcId:
+    Description: "VPC where the WireGuard VPN operates and has network connectivity."
+    Value: !Ref VpcId
+
+  WireGuardVpnCidr:
+    Description: "CIDR block allocated for the WireGuard VPN network."
+    Value: !Ref VpnCidr
+  
+  WireGuardConfigFile:
+    Description: "Path to the WireGuard configuration file on the EC2 instance."
+    Value: "/etc/wireguard/wg0.conf"
+
+  WireGuardRestartCommand:
+    Description: "Command to restart the WireGuard service."
+    Value: "sudo systemctl restart wg-quick@wg0"
+
+  WireGuardStatusCommand:
+    Description: "Command to check the status of the WireGuard service."
+    Value: "sudo systemctl status wg-quick@wg0"
+
+  WireGuardInstallationUrl:
+    Description: "Official WireGuard installation page for reference."
+    Value: "https://www.wireguard.com/install/"
