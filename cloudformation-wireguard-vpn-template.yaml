@@ -106,9 +106,6 @@ Resources:
     Properties:
       AllocationId: !GetAtt WireGuardElasticIp.AllocationId
       InstanceId: !Ref WireGuardEc2Instance
-      Tags:
-        - Key: Name
-          Value: !Sub "${Prefix}wireguard-eip-association"
   
   # WaitConditionHandle used by CloudFormation to wait for EC2 setup completion
   WaitHandle:
@@ -236,7 +233,7 @@ Resources:
                 ensureRunning: true
               
     Properties:
-      InstanceType: t3.micro
+      InstanceType: t2.micro
       SubnetId: !Ref PublicSubnetId
       ImageId: !Sub "{{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id}}"
       IamInstanceProfile: !Ref WireGuardInstanceProfile
