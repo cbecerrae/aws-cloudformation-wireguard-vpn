@@ -17,12 +17,12 @@ Parameters:
     Default: ''
     Description: "(Optional) Prefix for all AWS resource names created by this stack; if not empty, it must end with '-'."
     AllowedPattern: '^$|.*-$'
-    ConstraintDescription: "Prefix must be empty or end with a '-'"
+    ConstraintDescription: "Prefix must be empty or end with a '-'."
 
   AttachElasticIp:
     Type: String
-    Default: 'False'
-    AllowedValues: ['True', 'False']
+    Default: 'false'
+    AllowedValues: ['true', 'false']
     Description: "Whether to attach an Elastic IP to the WireGuard EC2 instance."
 
   VpnCidr:
@@ -33,8 +33,10 @@ Parameters:
 
   ClientConfig:
     Type: String
-    Description: "Comma-separated list of client alias and public key pairs (alias:PublicKey,alias:PublicKey)."
-    Default: ''
+    Description: "Comma-separated list of client number, alias, and public key triples (number:alias:PublicKey,number:alias:PublicKey)."
+    Default: ""
+    AllowedPattern: '^((([1-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-4]):[A-Za-z@]+:[A-Za-z0-9+/=]{43,44})(,([1-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-4]):[A-Za-z@]+:[A-Za-z0-9+/=]{43,44})*)?$'
+    ConstraintDescription: "Each entry must follow the format number:alias:PublicKey, where number is 1-254, alias contains letters or '@', and PublicKey is a valid WireGuard base64 key."
 
   Port:
     Type: Number
@@ -42,7 +44,7 @@ Parameters:
     Description: "UDP port on which WireGuard server will listen."
 
 Conditions:
-  UseElasticIp: !Equals [!Ref AttachElasticIp, 'True']
+  UseElasticIp: !Equals [!Ref AttachElasticIp, 'true']
 
 Resources:
   # IAM role assumed by the WireGuard EC2 instance
@@ -75,7 +77,7 @@ Resources:
   WireGuardInstanceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupName: !Sub "${Prefix}-wireguard-security-group"
+      GroupName: !Sub "${Prefix}wireguard-security-group"
       GroupDescription: "Security Group for WireGuard EC2 instance"
       VpcId: !Ref VpcId
       SecurityGroupIngress:
@@ -85,7 +87,7 @@ Resources:
           ToPort: !Ref Port
       Tags:
         - Key: Name
-          Value: !Sub "${Prefix}-wireguard-security-group"
+          Value: !Sub "${Prefix}wireguard-security-group"
 
   # Elastic IP for the WireGuard EC2 instance (conditionally attached)
   WireGuardElasticIp:
@@ -120,9 +122,119 @@ Resources:
       Timeout: 600 
       Count: 1
 
-  # EC2 instance running WireGuard VPN with user data to configure the server
+  # EC2 instance running WireGuard VPN with user data and cfn-init helper scripts to configure the server
   WireGuardEc2Instance:
     Type: AWS::EC2::Instance
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          packages:
+            apt:
+              wireguard: []
+              awscli: []
+              jq: []
+          files:
+            "/opt/wireguard-setup.sh":
+              content: |
+                #!/bin/bash
+                set -xe
+
+                # Generate server keys
+                [ ! -f /etc/wireguard/private.key ] && wg genkey | tee /etc/wireguard/private.key
+                chmod 600 /etc/wireguard/private.key
+                [ ! -f /etc/wireguard/public.key ] && cat /etc/wireguard/private.key | wg pubkey | tee /etc/wireguard/public.key
+
+                # Determine primary network interface for NAT
+                PRIMARY_IF=$(ip r | grep '^default' | awk '{print $5}')
+
+                # Create base wg0.conf configuration with inline comments
+                echo "[Interface]" > /etc/wireguard/wg0.conf
+                echo "# Private key generated on the EC2 instance" >> /etc/wireguard/wg0.conf
+                echo "PrivateKey = $(cat /etc/wireguard/private.key)" >> /etc/wireguard/wg0.conf
+                echo "# IP address assigned to the EC2 instance within the VPN" >> /etc/wireguard/wg0.conf
+                echo "Address = ${VPN_CIDR%.*}.255/32" >> /etc/wireguard/wg0.conf
+                echo "# Port WireGuard will listen on" >> /etc/wireguard/wg0.conf
+                echo "ListenPort = ${PORT}" >> /etc/wireguard/wg0.conf
+                echo "# Traffic masquerading rules for PostUp and PostDown" >> /etc/wireguard/wg0.conf
+                echo "PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -t nat -A POSTROUTING -o $PRIMARY_IF -j MASQUERADE" >> /etc/wireguard/wg0.conf
+                echo "PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -o $PRIMARY_IF -j MASQUERADE" >> /etc/wireguard/wg0.conf
+
+                # Process client configurations
+                IFS=',' read -ra CLIENTS <<< "$CLIENT_CONFIG"
+
+                for entry in "${CLIENTS[@]}"; do
+                  number=$(echo "$entry" | cut -d':' -f1)
+                  alias=$(echo "$entry" | cut -d':' -f2)
+                  pubkey=$(echo "$entry" | cut -d':' -f3)
+
+                  # Assign IP address to client
+                  client_ip="${VPN_CIDR%.*}.${number}/32"
+
+                  # Append client peer configuration to wg0.conf
+                  echo "" >> /etc/wireguard/wg0.conf
+                  echo "[Peer]" >> /etc/wireguard/wg0.conf
+                  echo "# Public key generated for Client ${number} ${alias}" >> /etc/wireguard/wg0.conf
+                  echo "PublicKey = ${pubkey}" >> /etc/wireguard/wg0.conf
+                  echo "# IP address assigned to Client ${number} ${alias} within VPN" >> /etc/wireguard/wg0.conf
+                  echo "AllowedIPs = ${client_ip}" >> /etc/wireguard/wg0.conf
+
+                done
+
+                # Secure wg0.conf file
+                sudo chmod 600 /etc/wireguard/wg0.conf
+
+                # Enable IPv4 forwarding
+                sudo sed -i 's/^#\(net.ipv4.ip_forward=1\)/\1/' /etc/sysctl.conf
+                sudo sysctl -p
+
+                # Restart WireGuard service
+                sudo systemctl restart wg-quick@wg0
+
+                # Extract public key for signaling
+                PUBKEY=$(cat /etc/wireguard/public.key)
+
+                # Send success signal to WaitConditionHandle
+                curl -X PUT -H 'Content-Type:' \
+                  --data-binary "{\"Status\":\"SUCCESS\",\"Reason\":\"WireGuard ready\",\"UniqueId\":\"WireGuardConfig\",\"Data\":\"$PUBKEY\"}" \
+                  "${WAIT_HANDLE}"
+
+              mode: "000755"
+              owner: "root"
+              group: "root"
+
+            "/etc/cfn/cfn-hup.conf":
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+                interval=1
+              mode: "000400"
+              owner: "root"
+              group: "root"
+
+            "/etc/cfn/hooks.d/cfn-auto-reloader.conf":
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.WireGuardEc2Instance.Metadata.AWS::CloudFormation::Init
+                action=cfn-init -v --stack ${AWS::StackName} --resource WireGuardEc2Instance --region ${AWS::Region}
+              mode: "000400"
+              owner: "root"
+              group: "root"
+          commands:
+            run_wireguard_setup:
+              command: "bash /opt/wireguard-setup.sh"
+              env:
+                VPN_CIDR: !Ref VpnCidr
+                PORT: !Ref Port
+                CLIENT_CONFIG: !Ref ClientConfig
+                WAIT_HANDLE: !Ref WaitHandle
+          services:
+            systemd:
+              wg-quick@wg0:
+                enabled: true
+                ensureRunning: true
+              
     Properties:
       InstanceType: t3.micro
       SubnetId: !Ref PublicSubnetId
@@ -133,12 +245,18 @@ Resources:
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
-          set -xe
-          export VPN_CIDR="${VpnCidr}"
-          export PORT="${Port}"
-          export CLIENT_CONFIG="${ClientConfig}"
-          export WAIT_HANDLE="${WaitHandle}"
-          echo IyEvYmluL2Jhc2gKc2V0IC14ZQoKIyBVcGRhdGUgcGFja2FnZSBsaXN0cyBhbmQgaW5zdGFsbCByZXF1aXJlZCBwYWNrYWdlcwphcHQgdXBkYXRlCmFwdCBpbnN0YWxsIC15IHdpcmVndWFyZCBhd3NjbGkganEKCiMgR2VuZXJhdGUgc2VydmVyIGtleXMKd2cgZ2Vua2V5IHwgdGVlIC9ldGMvd2lyZWd1YXJkL3ByaXZhdGUua2V5CmNobW9kIDYwMCAvZXRjL3dpcmVndWFyZC9wcml2YXRlLmtleQpjYXQgL2V0Yy93aXJlZ3VhcmQvcHJpdmF0ZS5rZXkgfCB3ZyBwdWJrZXkgfCB0ZWUgL2V0Yy93aXJlZ3VhcmQvcHVibGljLmtleQoKIyBEZXRlcm1pbmUgcHJpbWFyeSBuZXR3b3JrIGludGVyZmFjZSBmb3IgTkFUClBSSU1BUllfSUY9JChpcCByIHwgZ3JlcCAnXmRlZmF1bHQnIHwgYXdrICd7cHJpbnQgJDV9JykKCiMgQ3JlYXRlIGJhc2Ugd2cwLmNvbmYgY29uZmlndXJhdGlvbiB3aXRoIGlubGluZSBjb21tZW50cwplY2hvICJbSW50ZXJmYWNlXSIgPiAvZXRjL3dpcmVndWFyZC93ZzAuY29uZgplY2hvICIjIFByaXZhdGUga2V5IGdlbmVyYXRlZCBvbiB0aGUgRUMyIGluc3RhbmNlIiA+PiAvZXRjL3dpcmVndWFyZC93ZzAuY29uZgplY2hvICJQcml2YXRlS2V5ID0gJChjYXQgL2V0Yy93aXJlZ3VhcmQvcHJpdmF0ZS5rZXkpIiA+PiAvZXRjL3dpcmVndWFyZC93ZzAuY29uZgplY2hvICIjIElQIGFkZHJlc3MgYXNzaWduZWQgdG8gdGhlIEVDMiBpbnN0YW5jZSB3aXRoaW4gdGhlIFZQTiIgPj4gL2V0Yy93aXJlZ3VhcmQvd2cwLmNvbmYKZWNobyAiQWRkcmVzcyA9ICR7VlBOX0NJRFIlLip9LjEvMzIiID4+IC9ldGMvd2lyZWd1YXJkL3dnMC5jb25mCmVjaG8gIiMgUG9ydCBXaXJlR3VhcmQgd2lsbCBsaXN0ZW4gb24iID4+IC9ldGMvd2lyZWd1YXJkL3dnMC5jb25mCmVjaG8gIkxpc3RlblBvcnQgPSAke1BPUlR9IiA+PiAvZXRjL3dpcmVndWFyZC93ZzAuY29uZgplY2hvICIjIFRyYWZmaWMgbWFzcXVlcmFkaW5nIHJ1bGVzIGZvciBQb3N0VXAgYW5kIFBvc3REb3duIiA+PiAvZXRjL3dpcmVndWFyZC93ZzAuY29uZgplY2hvICJQb3N0VXAgPSBpcHRhYmxlcyAtQSBGT1JXQVJEIC1pICVpIC1qIEFDQ0VQVDsgaXB0YWJsZXMgLXQgbmF0IC1BIFBPU1RST1VUSU5HIC1vICRQUklNQVJZX0lGIC1qIE1BU1FVRVJBREUiID4+IC9ldGMvd2lyZWd1YXJkL3dnMC5jb25mCmVjaG8gIlBvc3REb3duID0gaXB0YWJsZXMgLUQgRk9SV0FSRCAtaSAlaSAtaiBBQ0NFUFQ7IGlwdGFibGVzIC10IG5hdCAtRCBQT1NUUk9VVElORyAtbyAkUFJJTUFSWV9JRiAtaiBNQVNRVUVSQURFIiA+PiAvZXRjL3dpcmVndWFyZC93ZzAuY29uZgoKIyBQcm9jZXNzIGNsaWVudCBjb25maWd1cmF0aW9ucwpJRlM9JywnIHJlYWQgLXJhIENMSUVOVFMgPDw8ICIkQ0xJRU5UX0NPTkZJRyIKZGVjbGFyZSAtQSBDTElFTlRTX01BUApDTElFTlRTX0pTT049Int9IiAgICMgSW5pdGlhbGl6ZSBhcyBlbXB0eSBKU09OIG9iamVjdAppcF9pbmRleD0yCgpmb3IgZW50cnkgaW4gIiR7Q0xJRU5UU1tAXX0iOyBkbwogIGFsaWFzPSQoZWNobyAiJGVudHJ5IiB8IGN1dCAtZCc6JyAtZjEpCiAgcHVia2V5PSQoZWNobyAiJGVudHJ5IiB8IGN1dCAtZCc6JyAtZjIpCgogICMgQXNzaWduIElQIGFkZHJlc3MgdG8gY2xpZW50CiAgY2xpZW50X2lwPSIke1ZQTl9DSURSJS4qfS4ke2lwX2luZGV4fS8zMiIKICBDTElFTlRTX01BUFsiJGFsaWFzIl09IiRjbGllbnRfaXAiCgogICMgQXBwZW5kIGNsaWVudCBwZWVyIGNvbmZpZ3VyYXRpb24gdG8gd2cwLmNvbmYKICBlY2hvICIiID4+IC9ldGMvd2lyZWd1YXJkL3dnMC5jb25mCiAgZWNobyAiW1BlZXJdIiA+PiAvZXRjL3dpcmVndWFyZC93ZzAuY29uZgogIGVjaG8gIiMgUHVibGljIGtleSBnZW5lcmF0ZWQgZm9yIENsaWVudCAke2FsaWFzfSIgPj4gL2V0Yy93aXJlZ3VhcmQvd2cwLmNvbmYKICBlY2hvICJQdWJsaWNLZXkgPSAke3B1YmtleX0iID4+IC9ldGMvd2lyZWd1YXJkL3dnMC5jb25mCiAgZWNobyAiIyBJUCBhZGRyZXNzIGFzc2lnbmVkIHRvIENsaWVudCAke2FsaWFzfSB3aXRoaW4gVlBOIiA+PiAvZXRjL3dpcmVndWFyZC93ZzAuY29uZgogIGVjaG8gIkFsbG93ZWRJUHMgPSAke2NsaWVudF9pcH0iID4+IC9ldGMvd2lyZWd1YXJkL3dnMC5jb25mCgogICMgQWRkIGNsaWVudCB0byBKU09OIG9iamVjdAogIENMSUVOVFNfSlNPTj0kKGVjaG8gIiRDTElFTlRTX0pTT04iIHwganEgLS1hcmcgYSAiJGFsaWFzIiAtLWFyZyBpcCAiJGNsaWVudF9pcCIgJy4gKyB7KCRhKTogJGlwfScpCgogICgoaXBfaW5kZXgrKykpCmRvbmUKCiMgU2VjdXJlIHdnMC5jb25mIGZpbGUKc3VkbyBjaG1vZCA2MDAgL2V0Yy93aXJlZ3VhcmQvd2cwLmNvbmYKIyBFbmFibGUgSVB2NCBmb3J3YXJkaW5nCnN1ZG8gc2VkIC1pICdzL14jXChuZXQuaXB2NC5pcF9mb3J3YXJkPTFcKS9cMS8nIC9ldGMvc3lzY3RsLmNvbmYKc3VkbyBzeXNjdGwgLXAKIyBFbmFibGUgYW5kIHN0YXJ0IFdpcmVHdWFyZCBzZXJ2aWNlCnN1ZG8gc3lzdGVtY3RsIGVuYWJsZSB3Zy1xdWlja0B3ZzAKc3VkbyBzeXN0ZW1jdGwgc3RhcnQgd2ctcXVpY2tAd2cwCnN1ZG8gc3lzdGVtY3RsIHN0YXR1cyB3Zy1xdWlja0B3ZzAKCiMgRXh0cmFjdCBwdWJsaWMga2V5IGZvciBzaWduYWxpbmcKUFVCS0VZPSQoY2F0IC9ldGMvd2lyZWd1YXJkL3B1YmxpYy5rZXkpCgojIFByZXBhcmUgZmluYWwgSlNPTiB3aXRoIHNlcnZlciBwdWJsaWMga2V5IGFuZCBjbGllbnQgYWRkcmVzc2VzCkpTT049JChqcSAtbiAtLWFyZyBwayAiJFBVQktFWSIgLS1hcmdqc29uIGNhICIkQ0xJRU5UU19KU09OIiBcCiAgICAgICAgICAne3B1YmxpY0tleTokcGssIGNsaWVudHNBZGRyZXNzZXM6JGNhfScpCgojIEVuY29kZSBKU09OIHRvIGJhc2U2NApFTkNPREVEX0pTT049JChlY2hvICIkSlNPTiIgfCBiYXNlNjQgLXcwKQoKIyBTZW5kIHN1Y2Nlc3Mgc2lnbmFsIHRvIFdhaXRDb25kaXRpb25IYW5kbGUKY3VybCAtWCBQVVQgLUggJ0NvbnRlbnQtVHlwZTonIFwKICAtLWRhdGEtYmluYXJ5ICJ7XCJTdGF0dXNcIjpcIlNVQ0NFU1NcIixcIlJlYXNvblwiOlwiV2lyZUd1YXJkIHJlYWR5XCIsXCJVbmlxdWVJZFwiOlwiV2lyZUd1YXJkQ29uZmlnXCIsXCJEYXRhXCI6XCIkRU5DT0RFRF9KU09OXCJ9IiBcCiAgIiR7V0FJVF9IQU5ETEV9Igo= | base64 -d | bash
+          # Update package lists and install required packages
+          apt update
+          apt install -y python3-pip
+
+          # Install AWS CloudFormation bootstrap scripts
+          pip3 install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
+          
+          # Run cfn-init to apply metadata configurations
+          cfn-init -v --stack ${AWS::StackName} --resource WireGuardEc2Instance --region ${AWS::Region}
+          
+          # Start cfn-hup daemon to check for updates
+          cfn-hup -v
       Tags:
         - Key: Name
           Value: !Sub "${Prefix}wireguard-vpn-instance"
@@ -176,10 +294,10 @@ Resources:
           import base64
           import boto3
           import cfnresponse
-          
+
           # Initialize EC2 client
           ec2 = boto3.client("ec2")
-          
+
           def handler(event, context):
               try:
                   # Log the received CloudFormation event for debugging
@@ -187,11 +305,11 @@ Resources:
 
                   # Extract resource properties from the CloudFormation custom resource
                   props = event["ResourceProperties"]
-                  encoded_json_wrapper = props["EncodedJson"]
+                  server_pubkey_wrapper = props["ServerPublicKey"]
 
-                  # Decode the wrapper JSON containing WireGuard configuration
-                  wrapper = json.loads(encoded_json_wrapper)
-                  encoded_config = wrapper["WireGuardConfig"]
+                  # Decode the wrapper JSON containing WireGuard server public key
+                  wrapper = json.loads(server_pubkey_wrapper)
+                  server_pubkey = wrapper["WireGuardConfig"]
 
                   # Extract additional properties
                   public_ip = props["PublicIp"]
@@ -203,37 +321,21 @@ Resources:
                   vpc_resp = ec2.describe_vpcs(VpcIds=[vpc_id])
                   vpc_cidr = vpc_resp["Vpcs"][0]["CidrBlock"]
                   
-                  # Decode the base64-encoded WireGuard JSON from the EC2 instance
-                  decoded_bytes = base64.b64decode(encoded_config)
-                  decoded_str = decoded_bytes.decode("utf-8")
-                  ec2_data = json.loads(decoded_str)
-                  
-                  # Extract server public key and client IPs
-                  server_pubkey = ec2_data.get("publicKey")
-                  clients = ec2_data.get("clientsAddresses", {})
-                  
-                  # Build multi-line tunnel configuration for each client
-                  lines = []
-                  for alias, client_ip in clients.items():
-                      # Create individual configuration block for the client
-                      block_lines = [
-                          f"Address = {client_ip}",  # Client's VPN address
-                          "[Peer]",  # Begin peer section
-                          f"PublicKey = {server_pubkey}",  # WireGuard server public key
-                          f"AllowedIPs = {vpn_cidr}, {vpc_cidr}",  # Routes allowed for the client
-                          f"Endpoint = {public_ip}:{port}"  # Server endpoint for this peer
-                      ]
-                      block_text = "\n".join(block_lines)
+                  # Build client tunnel configuration
+                  lines = [
+                      f"Address = {vpn_cidr.rsplit('.', 1)[0] + './' + vpn_cidr.split('/')[-1]}",  # Client's VPN address
+                      "[Peer]",  # Begin peer section
+                      f"PublicKey = {server_pubkey}",  # WireGuard server public key
+                      f"AllowedIPs = {vpn_cidr}, {vpc_cidr}",  # Routes allowed for the client
+                      f"Endpoint = {public_ip}:{port}"  # Server endpoint for this peer
+                  ]
+                  tunnel_config = "\n".join(lines)
 
-                      # Encode each block in base64 to safely transport via JSON
-                      encoded_block = base64.b64encode(block_text.encode()).decode()
-                      lines.append(f"{alias}: {encoded_block}")
-
-                  # Join all client blocks into a single string separated by spaces
-                  tunnel_config = " ".join(lines)
+                  # Encode tunnel configuration in base64 to safely transport via JSON
+                  encoded_tunnel_config = base64.b64encode(tunnel_config.encode()).decode()
 
                   # Prepare response data for CloudFormation
-                  response_data = {"TunnelConfig": tunnel_config}
+                  response_data = {"TunnelConfig": encoded_tunnel_config}
 
                   # Send SUCCESS response to CloudFormation
                   cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
@@ -247,7 +349,7 @@ Resources:
     Type: Custom::WireGuardTunnelConfig
     Properties:
       ServiceToken: !GetAtt CustomResourceLambdaFunction.Arn
-      EncodedJson: !GetAtt WaitCondition.Data
+      ServerPublicKey: !GetAtt WaitCondition.Data
       PublicIp: !If [UseElasticIp, !Ref WireGuardElasticIp, !GetAtt WireGuardEc2Instance.PublicIp]
       VpnCidr: !Ref VpnCidr
       Port: !Ref Port
@@ -275,7 +377,7 @@ Outputs:
     Value: !Sub "ping ${WireGuardEc2Instance.PrivateIp}"
   
   WireGuardTunnelConfig:
-    Description: "Complete WireGuard tunnel configuration for clients."
+    Description: "WireGuard client tunnel configuration encoded in Base64."
     Value: !GetAtt CustomResource.TunnelConfig
 
   WireGuardPort:
@@ -305,3 +407,7 @@ Outputs:
   WireGuardInstallationUrl:
     Description: "Official WireGuard installation page for reference."
     Value: "https://www.wireguard.com/install/"
+
+  ClientTunnelConfigDecodeUrl:
+    Description: "Online tool to decode the Base64 client tunnel configuration."
+    Value: "https://www.base64decode.org/"

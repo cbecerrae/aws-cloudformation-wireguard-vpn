@@ -4,7 +4,7 @@ Description: VPC with 2 public subnets, 2 private subnets, NAT Gateway, and a pr
 Parameters:
   ResourcePrefix:
     Type: String
-    Default: "lab-cloudformation-wireguard-"
+    Default: "lab-cloudformation-"
     Description: Prefix for all resource names
 
   UbuntuLatestAmiId:
@@ -16,7 +16,7 @@ Resources:
   # -----------------
   # Networking
   # -----------------
-  MyVPC:
+  TestVpc:
     Type: AWS::EC2::VPC
     Properties:
       CidrBlock: 10.0.0.0/16
@@ -36,13 +36,13 @@ Resources:
   AttachIGW:
     Type: AWS::EC2::VPCGatewayAttachment
     Properties:
-      VpcId: !Ref MyVPC
+      VpcId: !Ref TestVpc
       InternetGatewayId: !Ref InternetGateway
 
   PublicSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
-      VpcId: !Ref MyVPC
+      VpcId: !Ref TestVpc
       CidrBlock: 10.0.1.0/24
       MapPublicIpOnLaunch: true
       AvailabilityZone: !Select [0, !GetAZs '']
@@ -53,7 +53,7 @@ Resources:
   PublicSubnet2:
     Type: AWS::EC2::Subnet
     Properties:
-      VpcId: !Ref MyVPC
+      VpcId: !Ref TestVpc
       CidrBlock: 10.0.2.0/24
       MapPublicIpOnLaunch: true
       AvailabilityZone: !Select [1, !GetAZs '']
@@ -64,7 +64,7 @@ Resources:
   PrivateSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
-      VpcId: !Ref MyVPC
+      VpcId: !Ref TestVpc
       CidrBlock: 10.0.3.0/24
       MapPublicIpOnLaunch: false
       AvailabilityZone: !Select [0, !GetAZs '']
@@ -75,7 +75,7 @@ Resources:
   PrivateSubnet2:
     Type: AWS::EC2::Subnet
     Properties:
-      VpcId: !Ref MyVPC
+      VpcId: !Ref TestVpc
       CidrBlock: 10.0.4.0/24
       MapPublicIpOnLaunch: false
       AvailabilityZone: !Select [1, !GetAZs '']
@@ -89,7 +89,7 @@ Resources:
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
-      VpcId: !Ref MyVPC
+      VpcId: !Ref TestVpc
       Tags:
         - Key: Name
           Value: !Sub "${ResourcePrefix}public-rt"
@@ -117,7 +117,7 @@ Resources:
   PrivateRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
-      VpcId: !Ref MyVPC
+      VpcId: !Ref TestVpc
       Tags:
         - Key: Name
           Value: !Sub "${ResourcePrefix}private-rt"
@@ -168,7 +168,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: SG for private EC2 allowing ICMP and HTTP from VPC CIDR
-      VpcId: !Ref MyVPC
+      VpcId: !Ref TestVpc
       SecurityGroupIngress:
         - IpProtocol: icmp
           FromPort: -1
@@ -207,11 +207,12 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub "${ResourcePrefix}private-ec2"
+    DependsOn: PrivateRouteToInternet
 
 Outputs:
   VPCId:
     Description: VPC ID
-    Value: !Ref MyVPC
+    Value: !Ref TestVpc
   PublicSubnet1Id:
     Description: Public Subnet 1 ID
     Value: !Ref PublicSubnet1
