@@ -245,6 +245,8 @@ Resources:
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
+          set -xe
+          
           # Update package lists and install required packages
           apt update
           apt install -y python3-pip
