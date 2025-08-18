@@ -12,6 +12,11 @@ Parameters:
     Description: "Public subnet within the selected VPC where the WireGuard EC2 instance will be deployed."
     Default: ''
 
+  InstanceType:
+    Type: String
+    Default: t2.micro
+    Description: "Amazon EC2 instance type used to provision the WireGuard server."
+  
   Prefix:
     Type: String
     Default: ''
@@ -237,7 +242,7 @@ Resources:
                 ensureRunning: true
               
     Properties:
-      InstanceType: t2.micro
+      InstanceType: !Ref InstanceType
       SubnetId: !Ref PublicSubnetId
       ImageId: !Sub "{{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id}}"
       IamInstanceProfile: !Ref WireGuardInstanceProfile
