@@ -27,21 +27,25 @@ Parameters:
 
   VpnCidr:
     Type: String
-    Default: 100.64.0.0/16
-    AllowedPattern: '^.+/(1[6-9]|2[0-4])$'
-    Description: "CIDR block for the VPN network; must be between /16 and /24."
-
+    Default: 100.64.0.0/24
+    Description: "CIDR block for the VPN network. Must use a /24 mask."
+    AllowedPattern: '^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}0/24$'
+    ConstraintDescription: "CIDR must be a valid IPv4 CIDR with a /24 prefix length and end in .0/24."
+  
   ClientConfig:
     Type: String
     Description: "Comma-separated list of client number, alias, and public key triples (number:alias:PublicKey,number:alias:PublicKey)."
     Default: ""
-    AllowedPattern: '^((([1-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-4]):[A-Za-z@]+:[A-Za-z0-9+/=]{43,44})(,([1-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-4]):[A-Za-z@]+:[A-Za-z0-9+/=]{43,44})*)?$'
-    ConstraintDescription: "Each entry must follow the format number:alias:PublicKey, where number is 1-254, alias contains letters or '@', and PublicKey is a valid WireGuard base64 key."
+    AllowedPattern: '^((([1-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-3]):[A-Za-z@]+:[A-Za-z0-9+/=]{43,44})(,([1-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-3]):[A-Za-z@]+:[A-Za-z0-9+/=]{43,44})*)?$'
+    ConstraintDescription: "Each entry must follow the format number:alias:PublicKey, where number is 1-253, alias contains letters or '@', and PublicKey is a valid WireGuard base64 key."
 
   Port:
     Type: Number
     Default: 51820
     Description: "UDP port on which WireGuard server will listen."
+    MinValue: 1024
+    MaxValue: 65535
+    ConstraintDescription: "Port must be a valid port number between 1024 and 65535."
 
 Conditions:
   UseElasticIp: !Equals [!Ref AttachElasticIp, 'true']
@@ -149,7 +153,7 @@ Resources:
                 echo "# Private key generated on the EC2 instance" >> /etc/wireguard/wg0.conf
                 echo "PrivateKey = $(cat /etc/wireguard/private.key)" >> /etc/wireguard/wg0.conf
                 echo "# IP address assigned to the EC2 instance within the VPN" >> /etc/wireguard/wg0.conf
-                echo "Address = ${VPN_CIDR%.*}.255/32" >> /etc/wireguard/wg0.conf
+                echo "Address = ${VPN_CIDR%.*}.254/32" >> /etc/wireguard/wg0.conf
                 echo "# Port WireGuard will listen on" >> /etc/wireguard/wg0.conf
                 echo "ListenPort = ${PORT}" >> /etc/wireguard/wg0.conf
                 echo "# Traffic masquerading rules for PostUp and PostDown" >> /etc/wireguard/wg0.conf

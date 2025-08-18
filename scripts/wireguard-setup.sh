@@ -14,7 +14,7 @@ echo "[Interface]" > /etc/wireguard/wg0.conf
 echo "# Private key generated on the EC2 instance" >> /etc/wireguard/wg0.conf
 echo "PrivateKey = $(cat /etc/wireguard/private.key)" >> /etc/wireguard/wg0.conf
 echo "# IP address assigned to the EC2 instance within the VPN" >> /etc/wireguard/wg0.conf
-echo "Address = ${VPN_CIDR%.*}.255/32" >> /etc/wireguard/wg0.conf
+echo "Address = ${VPN_CIDR%.*}.254/32" >> /etc/wireguard/wg0.conf
 echo "# Port WireGuard will listen on" >> /etc/wireguard/wg0.conf
 echo "ListenPort = ${PORT}" >> /etc/wireguard/wg0.conf
 echo "# Traffic masquerading rules for PostUp and PostDown" >> /etc/wireguard/wg0.conf
