@@ -11,13 +11,14 @@ The stack accepts several parameters to customize deployment:
 
 | Parameter           | Type                 | Default         | Description                                                                                                             | Required |
 | ------------------- | -------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------- | -------- |
-| **VpcId**           | AWS::EC2::VPC::Id    | (empty)         | The VPC where the WireGuard VPN will operate.                                                                           | Yes      |
-| **PublicSubnetId**  | AWS::EC2::Subnet::Id | (empty)         | Public subnet within the VPC where the WireGuard EC2 instance will be deployed.                                         | Yes      |
-| **Prefix**          | String               | (empty)         | Optional prefix for resource names. If set, must end with `-`.                                                          | No       |
 | **AttachElasticIp** | String               | `false`         | Whether to associate an Elastic IP with the EC2 instance (`true` or `false`).                                           | Yes      |
-| **VpnCidr**         | String               | `100.64.0.0/16` | CIDR block for the VPN network. Must be between `/16` and `/24`.                                                        | Yes      |
 | **ClientConfig**    | String               | (empty)         | Comma-separated list of clients in the format: `number:alias:PublicKey`. Example: `1:john:Base64Key,2:alice:Base64Key`. | Yes      |
+| **InstanceType**    | String               | `t2.micro`      | Amazon EC2 instance type used to provision the WireGuard server.                                                        | Yes      |
 | **Port**            | Number               | `51820`         | UDP port where the WireGuard server listens.                                                                            | Yes      |
+| **Prefix**          | String               | (empty)         | Optional prefix for resource names. If set, must end with `-`.                                                          | No       |
+| **PublicSubnetId**  | AWS::EC2::Subnet::Id | (empty)         | Public subnet within the VPC where the WireGuard EC2 instance will be deployed.                                         | Yes      |
+| **VpcId**           | AWS::EC2::VPC::Id    | (empty)         | The VPC where the WireGuard VPN will operate.                                                                           | Yes      |
+| **VpnCidr**         | String               | `100.64.0.0/16` | CIDR block for the VPN network. Must be between `/16` and `/24`.                                                        | Yes      |
 
 ## Resources
 
