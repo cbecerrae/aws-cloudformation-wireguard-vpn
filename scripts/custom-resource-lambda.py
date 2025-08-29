@@ -22,8 +22,9 @@ def handler(event, context):
         # Extract additional properties
         public_ip = props["PublicIp"]
         vpn_cidr = props["VpnCidr"]
-        port = int(props.get("Port", 51820))
+        port = int(props["Port"])
         vpc_id = props["VpcId"]
+        additional_cidrs = props["AdditionalCidrs"]
         
         # Retrieve VPC CIDR block from AWS
         vpc_resp = ec2.describe_vpcs(VpcIds=[vpc_id])
@@ -34,7 +35,7 @@ def handler(event, context):
             f"Address = {vpn_cidr.rsplit('.', 1)[0] + './' + vpn_cidr.split('/')[-1]}",  # Client's VPN address
             "[Peer]",  # Begin peer section
             f"PublicKey = {server_pubkey}",  # WireGuard server public key
-            f"AllowedIPs = {vpn_cidr}, {vpc_cidr}",  # Routes allowed for the client
+            f"AllowedIPs = {vpn_cidr}, {vpc_cidr} {',' + additional_cidrs if additional_cidrs else ''}",  # Routes allowed for the client
             f"Endpoint = {public_ip}:{port}"  # Server endpoint for this peer
         ]
         tunnel_config = "\n".join(lines)

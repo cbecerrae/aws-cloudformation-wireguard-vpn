@@ -11,6 +11,7 @@ The stack accepts several parameters to customize deployment:
 
 | Parameter           | Type                 | Default         | Description                                                                                                             | Required |
 | ------------------- | -------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------- | -------- |
+| **AdditionalCidrs** | String               | (empty)         | Optional comma-separated list of additional CIDR blocks to route through the VPN.                                       | No       |
 | **AttachElasticIp** | String               | `false`         | Whether to associate an Elastic IP with the EC2 instance (`true` or `false`).                                           | Yes      |
 | **ClientConfig**    | String               | (empty)         | Comma-separated list of clients in the format: `number:alias:PublicKey`. Example: `1:john:Base64Key,2:alice:Base64Key`. | Yes      |
 | **InstanceType**    | String               | `t2.micro`      | Amazon EC2 instance type used to provision the WireGuard server.                                                        | Yes      |

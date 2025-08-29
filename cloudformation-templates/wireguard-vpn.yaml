@@ -52,6 +52,13 @@ Parameters:
     MaxValue: 65535
     ConstraintDescription: "Port must be a valid port number between 1024 and 65535."
 
+  AdditionalCidrs:
+    Type: String
+    Description: "(Optional) Additional CIDR blocks to route through the VPN, separated by commas."
+    Default: ""
+    AllowedPattern: '^$|^((25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])/(3[0-2]|[12]?[0-9])(,((25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])/(3[0-2]|[12]?[0-9]))*$'
+    ConstraintDescription: "Each entry must be a valid IPv4 CIDR block, separated by commas."
+
 Conditions:
   UseElasticIp: !Equals [!Ref AttachElasticIp, 'true']
 
@@ -322,8 +329,9 @@ Resources:
                   # Extract additional properties
                   public_ip = props["PublicIp"]
                   vpn_cidr = props["VpnCidr"]
-                  port = int(props.get("Port", 51820))
+                  port = int(props["Port"])
                   vpc_id = props["VpcId"]
+                  additional_cidrs = props["AdditionalCidrs"]
                   
                   # Retrieve VPC CIDR block from AWS
                   vpc_resp = ec2.describe_vpcs(VpcIds=[vpc_id])
@@ -334,7 +342,7 @@ Resources:
                       f"Address = {vpn_cidr.rsplit('.', 1)[0] + './' + vpn_cidr.split('/')[-1]}",  # Client's VPN address
                       "[Peer]",  # Begin peer section
                       f"PublicKey = {server_pubkey}",  # WireGuard server public key
-                      f"AllowedIPs = {vpn_cidr}, {vpc_cidr}",  # Routes allowed for the client
+                      f"AllowedIPs = {vpn_cidr}, {vpc_cidr} {',' + additional_cidrs if additional_cidrs else ''}",  # Routes allowed for the client
                       f"Endpoint = {public_ip}:{port}"  # Server endpoint for this peer
                   ]
                   tunnel_config = "\n".join(lines)
@@ -362,6 +370,7 @@ Resources:
       VpnCidr: !Ref VpnCidr
       Port: !Ref Port
       VpcId: !Ref VpcId
+      AdditionalCidrs: !Ref AdditionalCidrs
 
 Outputs:
   WireGuardSecurityGroupId:
